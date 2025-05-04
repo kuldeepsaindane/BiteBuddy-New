@@ -1,0 +1,110 @@
+pipeline {
+    agent any
+
+     environment {
+        AWS_REGION = 'us-east-1'
+        AWS_ACCOUNT_ID = '314146332315'
+        REPO_NAME = 'BiteBuddy'
+        IMAGE_TAG = 'latest'
+        //SSH_PRIVATE_KEY_PATH = "/var/jenkins_home/.ssh/jenkins-key.pem"
+        SLACK_WEBHOOK_URL = "https://hooks.slack.com/services/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"
+
+        AWS_ACCESS_KEY_ID = credentials('aws-credentials')
+        AWS_SECRET_ACCESS_KEY = credentials('aws-credentials')
+        SSH_KEY = credentials('ssh-private-key')
+
+        
+        // Define IPs for both environments
+        DEV_SERVER_IP = "18.218.76.240"
+        QA_SERVER_IP = "10.0.2.242"
+    }
+
+    stages {
+        stage('Checkout - Clone Repository') {
+            steps {
+                git branch: 'main', url: 'https://github.com/kuldeepsaindane/BiteBuddy.git'
+            }
+        }
+
+        stage('Checking the Directory'){
+            steps {
+                sh 'pwd'
+                sh 'ls -l'
+                sh 'ls ${WORKSPACE}'
+            }
+        }
+
+        stage('Build Docker Images') {
+            steps {
+                sh 'docker build -t bitebuddy ./myapp'               
+            }
+        }
+
+        stage('Tag & Push Image to ECR') {
+            steps {
+                withCredentials([[
+                    $class: 'AmazonWebServicesCredentialsBinding',
+                    credentialsId: 'aws-credentials'
+                ]]) {
+                    sh '''
+                        aws ecr-public get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REPO
+                        docker tag bitebuddy $ECR_REPO/bitebuddy:latest
+                        docker push $ECR_REPO/bitebuddy:latest
+                    '''
+                }
+            }
+        }
+
+        stage('Set Deploy Server') {
+            steps {
+                script {
+                    env.DEPLOY_SERVER = DEV_SERVER_IP ? "18.218.76.240"
+                }
+            }
+        }
+
+        stage('Remote Deploy to EC2') {
+            steps {
+                withCredentials([sshUserPrivateKey(credentialsId: 'ssh-private-key', keyFileVariable: 'KEY')]) {
+                    sh '''
+                        echo "🚀 Deploying to $DEPLOY_SERVER..."
+                        ssh -i $KEY -o StrictHostKeyChecking=no ec2-user@$DEPLOY_SERVER 'bash ~/run-docker.sh'
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            // Send Slack message for Dev Deployment Success
+            slackSend channel: 'team2', 
+            message: """✅ *Build SUCCESS:* Deployement DEV Successfull!
+                    *Environment:* DEV
+                    *Job:* ${env.JOB_NAME}
+                    *Status:* SUCCESS 
+                    *Access at:* http:/18.218.76.240:3000 """
+            
+            // // Send Slack message for QA Deployment Success
+            // slackSend channel: 'team2', 
+            // message: """✅ *Build SUCCESS:* Deployment to QA successful!
+            //         *Environment:* QA
+            //         *Job:* ${env.JOB_NAME}
+            //         *Status:* SUCCESS """
+        }
+        failure {
+            slackSend channel: 'team2',
+            message: """❌ *Build FAILED:* Deployment to DEV Failed! 
+                    *Environment:* DEV
+                    *Job:* ${env.JOB_NAME}
+                    *Status:* FAILURE """
+
+            // // Send Slack message for QA Deployment Failure
+            // slackSend channel: 'team2',
+            // message: """❌ *Build FAILED:* Deployment to QA failed! 
+            //         *Environment:* QA
+            //         *Job:* ${env.JOB_NAME}
+            //         *Status:* FAILURE """        
+        }
+    }
+}
